@@ -73,35 +73,67 @@ class OllamaClient:
     def _get_available_models(self) -> List[str]:
         """Fetch list of available models from Ollama"""
         try:
-            response = requests.get(f"{self.base_url}/api/tags")
+            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
             if response.status_code == 200:
-                models = [model['name'] for model in response.json()['models']]
+                models = [model['name'] for model in response.json().get('models', [])]
                 logger.info(f"Available models: {models}")
                 return models
             else:
-                logger.warning("Could not fetch available models, using defaults")
-                return ["llama3.1", "mistral", "codellama"]
+                logger.warning(f"Could not fetch models: HTTP {response.status_code}")
+                return []
+        except requests.exceptions.ConnectionError:
+            logger.error("Cannot connect to Ollama. Make sure it's running: ollama serve")
+            return []
         except Exception as e:
             logger.error(f"Error connecting to Ollama: {e}")
             return []
     
     async def generate(self, model: str, prompt: str, system_prompt: str = None) -> str:
         """Generate response from Ollama model"""
+        # Ensure model is available
+        if model not in self.available_models:
+            # Try common model variations
+            model_variants = [model, f"{model}:latest", f"{model}:8b", f"{model}:7b"]
+            available_model = None
+            for variant in model_variants:
+                if variant in self.available_models:
+                    available_model = variant
+                    break
+        
+            if not available_model:
+                return f"Error: Model '{model}' not found. Available models: {', '.join(self.available_models)}"
+            model = available_model
+        
+        # Use correct API format for newer Ollama versions
         payload = {
             "model": model,
             "prompt": prompt,
-            "stream": False
+            "stream": False,
+            "options": {}
         }
         
         if system_prompt:
             payload["system"] = system_prompt
             
         try:
-            response = requests.post(f"{self.base_url}/api/generate", json=payload)
+            response = requests.post(
+                f"{self.base_url}/api/generate", 
+                json=payload,
+                timeout=30  # Add timeout
+            )
+            
             if response.status_code == 200:
-                return response.json()['response']
+                result = response.json()
+                return result.get('response', 'No response generated')
+            elif response.status_code == 404:
+                return f"Error: Model '{model}' not found on Ollama server. Try: ollama pull {model}"
             else:
-                raise Exception(f"Ollama API error: {response.status_code}")
+                return f"Error: Ollama API error: {response.status_code} - {response.text}"
+            
+        except requests.exceptions.ConnectionError:
+            return "Error: Cannot connect to Ollama. Make sure Ollama is running (ollama serve)"
+        except requests.exceptions.Timeout:
+            return "Error: Request timed out. The model might be loading."
         except Exception as e:
             logger.error(f"Error generating response: {e}")
             return f"Error: Could not generate response - {str(e)}"
@@ -327,7 +359,7 @@ class MemoryManager:
 class BaseAgent:
     """Base class for all agents in the system"""
     
-    def __init__(self, agent_id: str, role: AgentRole, model: str = "llama3.1"):
+    def __init__(self, agent_id: str, role: AgentRole, model: str = "llama3.1:8b"):
         self.agent_id = agent_id
         self.role = role
         self.model = model
